@@ -109,7 +109,7 @@ internal static class CatalogSql
         """;
 
     public const string ItemSql = """
-        SELECT Id, MarketHashName, Weapon, SkinName, Wear, IsStatTrak, IsSouvenir, IsWatched
+        SELECT Id, MarketHashName, Weapon, SkinName, Wear, IsStatTrak, IsSouvenir, IsWatched, IconUrl
         FROM dbo.Item
         WHERE Id = @itemId;
         """;

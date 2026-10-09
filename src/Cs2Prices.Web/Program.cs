@@ -21,6 +21,8 @@ try
 
     builder.Services.AddRadzenComponents();
     builder.Services.AddCs2PricesData(builder.Configuration);
+    // The item page refreshes a single item on demand using the same providers as the collector.
+    builder.Services.AddMarketProviders(builder.Configuration);
 
     var app = builder.Build();
 

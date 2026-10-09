@@ -69,7 +69,13 @@ public sealed class SteamSweepProvider(
                 }
 
                 if (skip.Contains(name))
+                {
+                    // Watched items get their prices from the order-book lane; keep only the picture from here.
+                    if (r.AssetDescription?.IconUrl is { Length: > 0 } icon)
+                        batch.Add(new PriceQuote(name, null, null, null, null, null, _options.CurrencyCode, now,
+                            IconUrl: icon, IconOnly: true));
                     continue;
+                }
 
                 batch.Add(Map(name, r, _options.CurrencyCode, now));
             }
@@ -144,7 +150,8 @@ public sealed class SteamSweepProvider(
         BidQty: null,
         LastSale: null,
         Currency: currencyCode,
-        CapturedAtUtc: capturedAtUtc);
+        CapturedAtUtc: capturedAtUtc,
+        IconUrl: r.AssetDescription?.IconUrl);
 
     internal static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
@@ -181,4 +188,14 @@ internal sealed class SteamSearchResult
     /// <summary>Lowest listing price in minor units (cents); 0 when there are no listings.</summary>
     [JsonPropertyName("sell_price")]
     public long SellPrice { get; set; }
+
+    [JsonPropertyName("asset_description")]
+    public SteamAssetDescription? AssetDescription { get; set; }
+}
+
+internal sealed class SteamAssetDescription
+{
+    /// <summary>Steam image hash; the picture is at economy/image/{hash} on Steam's CDN.</summary>
+    [JsonPropertyName("icon_url")]
+    public string? IconUrl { get; set; }
 }

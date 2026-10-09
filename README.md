@@ -27,6 +27,10 @@ so start it before the web app. Secrets and API keys: see [docs/API-KEYS.md](doc
 | `steam-orderbook` | no | 5 min | **Bid and ask** with top-of-book quantity, for watched items only |
 | `csfloat`, `dmarket` | yes | | Waiting for keys |
 
+Steam prices arrive in your own Steam currency (the order-book endpoint cannot be asked for another one), so
+set `Providers:Steam:CurrencyId` / `CurrencyCode` in the Collector's `appsettings.json` to match (CHF is 4).
+The collector logs a warning if the order book answers in a different currency.
+
 Steam throttles hard (about 15 requests a minute, then 429). Both Steam lanes share one throttle
 (`MinRequestSpacing`, default 4.5 s) and a shared cooldown after a 429. A full sweep of about 35k market
 items takes roughly 25 minutes and saves progress every 10 pages. Intervals and switches are in

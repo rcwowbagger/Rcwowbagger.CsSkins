@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using System.Web;
 using Cs2Prices.Core.Providers.Steam;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -8,118 +9,97 @@ namespace Cs2Prices.Tests;
 
 public class SteamOrderBookProviderTests
 {
-    // Representative itemordershistogram?norender=1 response. Prices in highest_buy_order / lowest_sell_order are cents.
-    // Verify against a live response on first run: the parser only relies on the fields shown here.
-    private const string Histogram = """
-        {
-          "success": 1,
-          "sell_order_count": "1,234",
-          "sell_order_price": "$21.50",
-          "sell_order_table": [
-            {"price": "$21.50", "price_with_fee": "$21.50", "quantity": "3"},
-            {"price": "$21.60", "price_with_fee": "$21.60", "quantity": "7"}
-          ],
-          "buy_order_count": "2,345",
-          "buy_order_price": "$19.80",
-          "buy_order_table": [
-            {"price": "$19.80", "quantity": "1,012"},
-            {"price": "$19.70", "quantity": "5"}
-          ],
-          "highest_buy_order": "1980",
-          "lowest_sell_order": "2150",
-          "buy_order_graph": [[19.8, 1012, "x"]],
-          "sell_order_graph": [[21.5, 3, "x"]],
-          "price_prefix": "$",
-          "price_suffix": ""
-        }
+    // Trimmed from a real response of GET market/orderbook?q=Load&qp=[730,"AK-47 | Phantom Disruptor (Field-Tested)"]
+    // (recorded 2026-10-09 from Switzerland: prices are cents, eCurrency 4 = CHF).
+    private const string Book = """
+        {"data":{"success":true,"data":{"amtMaxBuyOrder":525,"amtMinSellOrder":572,"eCurrency":4,
+        "cBuyOrders":71894,"cSellOrders":1054,
+        "rgCompactBuyOrders":[525,11,520,3,519,3,517,15],
+        "rgCompactSellOrders":[572,1,587,1,592,1,605,1,606,3]}}}
         """;
 
-    private const string ListingPage =
-        "<html><script>Market_LoadOrderSpread( 175985258 ); // load the order book</script></html>";
-
-    private sealed class MemoryNameIdStore : ISteamNameIdStore
+    private static (SteamOrderBookProvider provider, FakeHandler handler) Create(
+        Func<HttpRequestMessage, HttpResponseMessage>? respond = null, int maxPerCycle = 40, string currencyCode = "CHF")
     {
-        public Dictionary<string, long> Ids { get; } = [];
-
-        public Task<long?> GetAsync(string marketHashName, CancellationToken cancellationToken) =>
-            Task.FromResult(Ids.TryGetValue(marketHashName, out var id) ? (long?)id : null);
-
-        public Task SetAsync(string marketHashName, long nameId, CancellationToken cancellationToken)
-        {
-            Ids[marketHashName] = nameId;
-            return Task.CompletedTask;
-        }
-    }
-
-    private static (SteamOrderBookProvider provider, FakeHandler handler, MemoryNameIdStore store) Create(
-        Func<HttpRequestMessage, HttpResponseMessage>? respond = null, int maxPerCycle = 40)
-    {
-        var handler = new FakeHandler(respond ?? DefaultResponse);
+        var handler = new FakeHandler(respond ?? (_ => FakeHandler.Json(Book)));
         var http = new HttpClient(handler) { BaseAddress = new Uri("https://steamcommunity.com/") };
-        var store = new MemoryNameIdStore();
         var options = Options.Create(new SteamOptions
         {
             MaxWatchlistPerCycle = maxPerCycle,
+            CurrencyCode = currencyCode,
             MinRequestSpacing = TimeSpan.FromMilliseconds(1),
             RateLimitCooldown = TimeSpan.FromMilliseconds(10)
         });
         var provider = new SteamOrderBookProvider(
             http, options, new SteamThrottle(TimeSpan.FromMilliseconds(1), TimeProvider.System),
-            store, TimeProvider.System, NullLogger<SteamOrderBookProvider>.Instance);
-        return (provider, handler, store);
+            TimeProvider.System, NullLogger<SteamOrderBookProvider>.Instance);
+        return (provider, handler);
     }
-
-    private static HttpResponseMessage DefaultResponse(HttpRequestMessage request) =>
-        request.RequestUri!.AbsolutePath.StartsWith("/market/listings/", StringComparison.Ordinal)
-            ? FakeHandler.Html(ListingPage)
-            : FakeHandler.Json(Histogram);
 
     private const string Redline = "AK-47 | Redline (Field-Tested)";
 
     [Fact]
-    public void Parses_bid_and_ask_with_top_of_book_quantities()
+    public void Parses_bid_ask_quantities_ladders_and_currency()
     {
-        var book = SteamOrderBookProvider.ParseOrderBook(Histogram);
+        var book = SteamOrderBookProvider.ParseOrderBook(Book);
 
         Assert.NotNull(book);
-        Assert.Equal(21.50m, book.Ask);
-        Assert.Equal(3, book.AskQty);
-        Assert.Equal(19.80m, book.Bid);
-        Assert.Equal(1012, book.BidQty);
+        Assert.Equal(5.72m, book.Ask);
+        Assert.Equal(1, book.AskQty);
+        Assert.Equal(5.25m, book.Bid);
+        Assert.Equal(11, book.BidQty);
+        Assert.Equal("CHF", book.Currency);
+        Assert.Equal(5, book.Asks.Count);
+        Assert.Equal((6.06m, 3), (book.Asks[4].Price, book.Asks[4].Quantity));
+        Assert.Equal(4, book.Bids.Count);
+        Assert.Equal((5.17m, 15), (book.Bids[3].Price, book.Bids[3].Quantity));
     }
 
     [Fact]
-    public void Failure_code_returns_null()
+    public void Failure_or_unknown_payload_returns_null()
     {
+        Assert.Null(SteamOrderBookProvider.ParseOrderBook("""{"data":{"success":false}}"""));
         Assert.Null(SteamOrderBookProvider.ParseOrderBook("""{"success":104}"""));
+        Assert.Null(SteamOrderBookProvider.ParseOrderBook("[]"));
     }
 
     [Fact]
     public void Empty_book_has_no_prices()
     {
         var book = SteamOrderBookProvider.ParseOrderBook(
-            """{"success":1,"sell_order_table":"","buy_order_table":"","highest_buy_order":null}""");
+            """{"data":{"success":true,"data":{"amtMaxBuyOrder":0,"eCurrency":1,"rgCompactBuyOrders":[],"rgCompactSellOrders":[]}}}""");
 
         Assert.NotNull(book);
         Assert.Null(book.Ask);
         Assert.Null(book.Bid);
         Assert.Null(book.AskQty);
-        Assert.Null(book.BidQty);
+        Assert.Empty(book.Bids);
+        Assert.Equal("USD", book.Currency);
     }
 
     [Theory]
-    [InlineData("Market_LoadOrderSpread( 175985258 );", 175985258L)]
-    [InlineData("x Market_LoadOrderSpread(42) y", 42L)]
-    [InlineData("nothing here", null)]
-    public void Extracts_item_nameid_from_listing_page(string html, long? expected)
+    [InlineData(1, "USD")]
+    [InlineData(3, "EUR")]
+    [InlineData(4, "CHF")]
+    [InlineData(999, null)]
+    public void Maps_steam_currency_ids(int id, string? code) =>
+        Assert.Equal(code, SteamOrderBookProvider.CurrencyCodeFor(id));
+
+    [Fact]
+    public void Url_is_keyed_by_market_hash_name()
     {
-        Assert.Equal(expected, SteamOrderBookProvider.ParseNameId(html));
+        var url = SteamOrderBookProvider.BuildUrl("AK-47 | Redline (Field-Tested)");
+
+        Assert.StartsWith("market/orderbook?q=Load&qp=", url);
+        var qp = HttpUtility.UrlDecode(url["market/orderbook?q=Load&qp=".Length..]);
+        Assert.Equal("""[730,"AK-47 | Redline (Field-Tested)"]""", qp);
+        Assert.Equal(730, JsonDocument.Parse(qp).RootElement[0].GetInt32());
     }
 
     [Fact]
     public async Task Does_nothing_without_a_watchlist()
     {
-        var (provider, handler, _) = Create();
+        var (provider, handler) = Create();
 
         var result = await provider.CollectAsync([]);
 
@@ -128,39 +108,36 @@ public class SteamOrderBookProviderTests
     }
 
     [Fact]
-    public async Task Produces_a_quote_with_both_sides_and_spread()
+    public async Task Produces_a_quote_with_both_sides_ladder_and_steams_currency()
     {
-        var (provider, _, _) = Create();
+        var (provider, handler) = Create();
 
         var result = await provider.CollectAsync([Redline]);
 
         var quote = Assert.Single(result.Quotes);
         Assert.Equal(Redline, quote.MarketHashName);
-        Assert.Equal(21.50m, quote.Ask);
-        Assert.Equal(19.80m, quote.Bid);
-        Assert.Equal(1.70m, quote.Spread);
-        Assert.Equal("USD", quote.Currency);
+        Assert.Equal(5.72m, quote.Ask);
+        Assert.Equal(5.25m, quote.Bid);
+        Assert.Equal(0.47m, quote.Spread);
+        Assert.Equal("CHF", quote.Currency);
+        Assert.Equal(5, quote.Depth!.Asks.Count);
+        Assert.Single(handler.Requests);           // one request per item, no page scraping
     }
 
     [Fact]
-    public async Task Looks_up_the_nameid_once_then_reuses_it()
+    public async Task Quote_uses_the_currency_steam_answered_in()
     {
-        var (provider, handler, store) = Create();
+        var (provider, _) = Create(currencyCode: "USD");
 
-        await provider.CollectAsync([Redline]);
-        await provider.CollectAsync([Redline]);
+        var quote = Assert.Single((await provider.CollectAsync([Redline])).Quotes);
 
-        Assert.Equal(175985258L, store.Ids[Redline]);
-        Assert.Single(handler.Requests, r => r.AbsolutePath.StartsWith("/market/listings/", StringComparison.Ordinal));
-        var histograms = handler.Requests.Where(r => r.AbsolutePath == "/market/itemordershistogram").ToList();
-        Assert.Equal(2, histograms.Count);
-        Assert.Equal("175985258", HttpUtility.ParseQueryString(histograms[0].Query)["item_nameid"]);
+        Assert.Equal("CHF", quote.Currency);
     }
 
     [Fact]
     public async Task Covers_a_large_watchlist_round_robin()
     {
-        var (provider, _, _) = Create(maxPerCycle: 1);
+        var (provider, _) = Create(maxPerCycle: 1);
         string[] watchlist = ["B | B (Factory New)", "A | A (Factory New)"];
 
         var first = await provider.CollectAsync(watchlist);
@@ -175,16 +152,10 @@ public class SteamOrderBookProviderTests
     [Fact]
     public async Task A_429_stops_the_cycle_and_keeps_earlier_quotes()
     {
-        var histogramCalls = 0;
-        var (provider, _, _) = Create(request =>
-        {
-            if (request.RequestUri!.AbsolutePath.StartsWith("/market/listings/", StringComparison.Ordinal))
-                return FakeHandler.Html(ListingPage);
-
-            return ++histogramCalls == 1
-                ? FakeHandler.Json(Histogram)
-                : new HttpResponseMessage(HttpStatusCode.TooManyRequests);
-        });
+        var calls = 0;
+        var (provider, _) = Create(_ => ++calls == 1
+            ? FakeHandler.Json(Book)
+            : new HttpResponseMessage(HttpStatusCode.TooManyRequests));
 
         var result = await provider.CollectAsync(["A | A (Factory New)", "B | B (Factory New)", "C | C (Factory New)"]);
 
@@ -193,12 +164,9 @@ public class SteamOrderBookProviderTests
     }
 
     [Fact]
-    public async Task Missing_nameid_counts_as_a_failure_not_an_exception()
+    public async Task A_rejected_item_counts_as_a_failure_not_an_exception()
     {
-        var (provider, _, _) = Create(request =>
-            request.RequestUri!.AbsolutePath.StartsWith("/market/listings/", StringComparison.Ordinal)
-                ? FakeHandler.Html("<html>no id on this page</html>")
-                : FakeHandler.Json(Histogram));
+        var (provider, _) = Create(_ => new HttpResponseMessage(HttpStatusCode.BadRequest));
 
         var result = await provider.CollectAsync([Redline]);
 

@@ -105,6 +105,9 @@ public sealed class ItemInfo
     public bool IsSouvenir { get; set; }
 
     public bool IsWatched { get; set; }
+
+    /// <summary>Steam image hash, when a market has described the item.</summary>
+    public string? IconUrl { get; set; }
 }
 
 /// <summary>

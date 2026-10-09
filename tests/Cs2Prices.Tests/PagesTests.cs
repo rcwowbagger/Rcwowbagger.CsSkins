@@ -9,12 +9,14 @@ namespace Cs2Prices.Tests;
 public class PagesTests : BunitContext
 {
     private readonly FakeCatalogQueries fake = new();
+    private readonly FakeItemRefresher refresher = new();
 
     public PagesTests()
     {
         JSInterop.Mode = JSRuntimeMode.Loose;
         ComponentFactories.AddStub<Radzen.Blazor.RadzenChart>();
         Services.AddSingleton<ICatalogQueries>(fake);
+        Services.AddSingleton<Cs2Prices.Core.Providers.IItemRefresher>(refresher);
         Services.AddSingleton(TimeProvider.System);
         Services.AddScoped<Radzen.DialogService>(); Services.AddScoped<Radzen.NotificationService>(); Services.AddScoped<Radzen.TooltipService>(); Services.AddScoped<Radzen.ContextMenuService>();
     }
@@ -117,5 +119,71 @@ public class PagesTests : BunitContext
         cut.FindAll("button").First(b => b.TextContent.Contains("Watch")).Click();
 
         Assert.Equal((10, true), fake.WatchCalls.Single());
+    }
+
+    [Fact]
+    public void Item_page_shows_the_image_linked_to_the_original()
+    {
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 10));
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("a.item-image")));
+
+        Assert.EndsWith("/iconhash123", cut.Find("a.item-image").GetAttribute("href"));
+        Assert.EndsWith("/iconhash123/360fx360f", cut.Find("a.item-image img").GetAttribute("src"));
+    }
+
+    [Fact]
+    public void Item_page_has_no_image_when_none_is_known()
+    {
+        fake.Item!.IconUrl = null;
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 10));
+        cut.WaitForAssertion(() => Assert.Contains("Skinport", cut.Markup));
+        Assert.Empty(cut.FindAll("a.item-image"));
+        Assert.Contains("No picture", cut.Markup);
+    }
+
+    [Fact]
+    public void Chart_explains_when_there_is_a_single_point()
+    {
+        var cut = Render<Cs2Prices.Web.Components.Market.PriceHistory>(p => p
+            .Add(x => x.Points, [new Cs2Prices.Core.Catalog.PricePoint(DateTime.UtcNow, 5m, null, null)]));
+        Assert.Contains("Only 1 price point", cut.Markup);
+    }
+
+    [Fact]
+    public void Opening_an_item_refreshes_that_item_from_the_markets()
+    {
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 10));
+
+        cut.WaitForAssertion(() => Assert.Contains("Steam: updated just now", cut.Markup));
+        Assert.Equal(("AK-47 | Redline (Field-Tested)", false), refresher.Calls.Single());
+        Assert.Contains("Skinport: rate limited", cut.Markup);
+    }
+
+    [Fact]
+    public void Refresh_button_forces_a_refresh_and_reloads_prices()
+    {
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 10));
+        cut.WaitForAssertion(() => Assert.Contains("Steam: updated just now", cut.Markup));
+        fake.Books[1].Ask = 99m;
+
+        cut.FindAll("button").First(b => b.TextContent.Contains("Refresh")).Click();
+
+        cut.WaitForAssertion(() => Assert.Equal(2, refresher.Calls.Count));
+        Assert.True(refresher.Calls[1].Force);
+        cut.WaitForAssertion(() => Assert.Contains("$99.00", cut.Markup));
+    }
+
+    [Fact]
+    public void Page_shows_stored_prices_while_the_refresh_is_running()
+    {
+        refresher.Gate = new TaskCompletionSource();
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 10));
+
+        cut.WaitForAssertion(() => Assert.Contains("Updating prices", cut.Markup));
+        Assert.Contains("$31.00", cut.Markup);      // stored Steam ladder is already visible
+        Assert.Contains("Refreshing…", cut.Markup);
+
+        refresher.Gate.SetResult();
+        cut.WaitForAssertion(() => Assert.DoesNotContain("Updating prices", cut.Markup));
     }
 }

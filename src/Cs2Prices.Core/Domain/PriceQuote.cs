@@ -21,6 +21,8 @@ public sealed record OrderBookDepth(IReadOnlyList<BookLevel> Asks, IReadOnlyList
 /// <summary>
 /// Normalized price observation from one market for one item.
 /// Ask = lowest sell listing, Bid = highest buy order. Either side may be unknown.
+/// <see cref="IconOnly"/> quotes carry just the item picture: they register the item and set its image but
+/// never touch prices (used for watched items, whose prices come from the order-book lane).
 /// </summary>
 public sealed record PriceQuote(
     string MarketHashName,
@@ -31,7 +33,9 @@ public sealed record PriceQuote(
     decimal? LastSale,
     string Currency,
     DateTime CapturedAtUtc,
-    OrderBookDepth? Depth = null)
+    OrderBookDepth? Depth = null,
+    string? IconUrl = null,
+    bool IconOnly = false)
 {
     public decimal? Spread => Ask is { } a && Bid is { } b ? a - b : null;
 

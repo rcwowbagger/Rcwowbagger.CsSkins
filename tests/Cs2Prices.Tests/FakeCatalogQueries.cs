@@ -21,7 +21,7 @@ internal sealed class FakeCatalogQueries : ICatalogQueries
     public List<(int Item, bool Watched)> WatchCalls { get; } = [];
     public List<(int Item, byte Market, HistoryRange Range)> HistoryCalls { get; } = [];
 
-    public ItemInfo? Item { get; set; } = new() { Id = 10, MarketHashName = "AK-47 | Redline (Field-Tested)", Weapon = "AK-47", SkinName = "Redline", Wear = "Field-Tested" };
+    public ItemInfo? Item { get; set; } = new() { Id = 10, MarketHashName = "AK-47 | Redline (Field-Tested)", Weapon = "AK-47", SkinName = "Redline", Wear = "Field-Tested", IconUrl = "iconhash123" };
 
     public List<MarketBook> Books { get; } =
     [

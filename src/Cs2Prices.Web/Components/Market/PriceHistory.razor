@@ -5,18 +5,28 @@
 }
 else
 {
+    @if (Points.Count < 2)
+    {
+        <p class="muted">Only @Points.Count price point@(Points.Count == 1 ? "" : "s") so far. A snapshot is stored when a price changes (or once an hour), so the line fills in as the Collector keeps running.</p>
+    }
     <RadzenChart>
         @if (ask.Count > 0)
         {
-            <RadzenLineSeries Data="@ask" CategoryProperty="At" ValueProperty="Value" Title="Ask" Smooth="false" />
+            <RadzenLineSeries Data="@ask" CategoryProperty="At" ValueProperty="Value" Title="Ask" Smooth="false">
+                <RadzenMarkers MarkerType="MarkerType.Circle" Size="6" />
+            </RadzenLineSeries>
         }
         @if (bid.Count > 0)
         {
-            <RadzenLineSeries Data="@bid" CategoryProperty="At" ValueProperty="Value" Title="Bid" Smooth="false" />
+            <RadzenLineSeries Data="@bid" CategoryProperty="At" ValueProperty="Value" Title="Bid" Smooth="false">
+                <RadzenMarkers MarkerType="MarkerType.Circle" Size="6" />
+            </RadzenLineSeries>
         }
         @if (sale.Count > 0)
         {
-            <RadzenLineSeries Data="@sale" CategoryProperty="At" ValueProperty="Value" Title="Last sale" Smooth="false" LineType="LineType.Dashed" />
+            <RadzenLineSeries Data="@sale" CategoryProperty="At" ValueProperty="Value" Title="Last sale" Smooth="false" LineType="LineType.Dashed">
+                <RadzenMarkers MarkerType="MarkerType.Circle" Size="6" />
+            </RadzenLineSeries>
         }
         <RadzenCategoryAxis Padding="20" Formatter="@FormatDate" />
         <RadzenValueAxis Formatter="@FormatValue">

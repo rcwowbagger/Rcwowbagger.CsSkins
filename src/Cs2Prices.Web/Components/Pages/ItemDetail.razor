@@ -1,8 +1,11 @@
 @page "/item/{ItemId:int}"
+@using Cs2Prices.Core.Providers
 @inject ICatalogQueries Queries
 @inject NavigationManager Nav
 @inject TimeProvider Time
 @inject IJSRuntime Js
+@inject IItemRefresher Refresher
+@implements IDisposable
 
 <PageTitle>@(item is null ? "Item" : Fmt.ItemTitle(item.Weapon, item.SkinName, item.MarketHashName)) · CS2 Prices</PageTitle>
 
@@ -23,20 +26,49 @@ else if (item is null)
 else
 {
     <header class="item-head">
-        <div>
+        @if (Fmt.ImageUrl(item.IconUrl, "360fx360f") is { } img)
+        {
+            <a class="item-image" href="@Fmt.ImageUrl(item.IconUrl)" target="_blank" rel="noopener noreferrer"
+               title="Open the original image">
+                <img src="@img" alt="@item.MarketHashName" width="180" height="180" loading="lazy" />
+            </a>
+        }
+        else
+        {
+            <div class="item-image item-image-missing" title="No picture collected yet">No picture<br />yet</div>
+        }
+        <div class="item-title">
             <h1>@Fmt.ItemTitle(item.Weapon, item.SkinName, item.MarketHashName)</h1>
             <p class="muted">
                 @item.MarketHashName
                 @if (item.IsStatTrak) { <span class="tag tag-stattrak">StatTrak™</span> }
                 @if (item.IsSouvenir) { <span class="tag tag-souvenir">Souvenir</span> }
             </p>
+            <p><a href="@Fmt.SteamListingUrl(item.MarketHashName)" target="_blank" rel="noopener noreferrer">Steam Community Market ↗</a></p>
         </div>
         <div class="actions">
             <button type="button" class="btn-plain" @onclick="ToggleWatchAsync"
                     aria-pressed="@(item.IsWatched ? "true" : "false")">@(item.IsWatched ? "★ Watching" : "☆ Watch")</button>
-            <button type="button" class="btn-plain" @onclick="LoadAsync" disabled="@loading">Refresh</button>
+            <button type="button" class="btn-plain" @onclick="() => RefreshLiveAsync(force: true)" disabled="@(loading || refreshing)">@(refreshing ? "Refreshing…" : "Refresh")</button>
         </div>
     </header>
+
+    @if (refreshing || refreshResults.Count > 0)
+    {
+        <p class="refresh-status" aria-live="polite">
+            @if (refreshing)
+            {
+                <span>Updating prices from the markets…</span>
+            }
+            else
+            {
+                @foreach (var r in refreshResults)
+                {
+                    <span class="chip @ChipClass(r.Outcome)" title="@r.Message">@r.MarketName: @ChipText(r)</span>
+                }
+            }
+        </p>
+    }
 
     @if (books.Count == 0)
     {
@@ -85,16 +117,95 @@ else
     private bool loading;
     private string? error;
     private int historyTicket;
+    private bool refreshing;
+    private int refreshTicket;
+    private IReadOnlyList<MarketRefreshResult> refreshResults = [];
+    private CancellationTokenSource? refreshCts;
 
     private string HistoryCurrency => books.FirstOrDefault(b => b.MarketId == historyMarket)?.Currency ?? "";
 
     protected override async Task OnParametersSetAsync()
     {
+        refreshCts?.Cancel();
+        refreshing = false;
+        refreshResults = [];
         item = null;
         books = [];
         history = [];
         historyMarket = 0;
         await LoadAsync();
+
+        // Show what we have straight away, then bring this item up to date from the markets.
+        if (item is not null)
+            _ = RefreshLiveAsync(force: false);
+    }
+
+    /// <summary>Fetches this item's prices from the markets now, then reloads the page data.</summary>
+    private async Task RefreshLiveAsync(bool force)
+    {
+        if (item is null || (refreshing && !force))
+            return;
+
+        refreshCts?.Cancel();
+        refreshCts?.Dispose();
+        refreshCts = new CancellationTokenSource();
+        var token = refreshCts.Token;
+        var itemId = ItemId;
+        var ticket = ++refreshTicket;
+
+        refreshing = true;
+        refreshResults = [];
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var results = await Refresher.RefreshAsync(item.MarketHashName, force, token);
+            if (token.IsCancellationRequested || itemId != ItemId)
+                return;
+
+            refreshResults = results;
+            if (results.Any(r => r.Outcome == RefreshOutcome.Updated))
+                await LoadAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            // navigated away
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not refresh prices: {ex.Message}";
+        }
+        finally
+        {
+            if (ticket == refreshTicket)
+            {
+                refreshing = false;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private static string ChipClass(RefreshOutcome o) => o switch
+    {
+        RefreshOutcome.Updated => "ok",
+        RefreshOutcome.Recent => "ok",
+        RefreshOutcome.NotListed => "warn",
+        _ => "bad"
+    };
+
+    private static string ChipText(MarketRefreshResult r) => r.Outcome switch
+    {
+        RefreshOutcome.Updated => "updated just now",
+        RefreshOutcome.Recent => "already fresh",
+        RefreshOutcome.NotListed => "not listed",
+        RefreshOutcome.RateLimited => "rate limited",
+        _ => "failed"
+    };
+
+    public void Dispose()
+    {
+        refreshCts?.Cancel();
+        refreshCts?.Dispose();
     }
 
     /// <summary>Reloads item, books and history. Also the hook a later live-ticking step will call.</summary>

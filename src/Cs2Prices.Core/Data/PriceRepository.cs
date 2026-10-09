@@ -135,6 +135,8 @@ public sealed class PriceRepository(string connectionString, ILogger<PriceReposi
         table.Columns.Add("Currency", typeof(string));
         table.Columns.Add("CapturedAt", typeof(DateTime));
         table.Columns.Add("HasDepth", typeof(bool));
+        table.Columns.Add("IconUrl", typeof(string));
+        table.Columns.Add("IconOnly", typeof(bool));
 
         var levels = new DataTable();
         levels.Columns.Add("MarketHashName", typeof(string));
@@ -157,7 +159,9 @@ public sealed class PriceRepository(string connectionString, ILogger<PriceReposi
                 (object?)q.LastSale ?? DBNull.Value, q.Currency,
                 // DATETIME2(0): truncate to whole seconds so comparisons are stable.
                 new DateTime(q.CapturedAtUtc.Ticks - q.CapturedAtUtc.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc),
-                q.Depth is not null);
+                q.Depth is not null,
+                (object?)q.IconUrl ?? DBNull.Value,
+                q.IconOnly);
 
             if (q.Depth is null)
                 continue;
@@ -191,6 +195,8 @@ public sealed class PriceRepository(string connectionString, ILogger<PriceReposi
             Currency       CHAR(3) NOT NULL,
             CapturedAt     DATETIME2(0) NOT NULL,
             HasDepth       BIT NOT NULL DEFAULT (0),
+            IconUrl        NVARCHAR(512) COLLATE DATABASE_DEFAULT NULL,
+            IconOnly       BIT NOT NULL DEFAULT (0),
             ItemId         INT NULL,
             WriteSnapshot  BIT NOT NULL DEFAULT (0)
         );
@@ -207,15 +213,22 @@ public sealed class PriceRepository(string connectionString, ILogger<PriceReposi
     // Returns the number of snapshot rows appended.
     internal const string ApplyStageSql = """
         -- 1. Register skins we have not seen before.
-        INSERT INTO dbo.Item (MarketHashName, ItemType, Weapon, SkinName, Wear, IsStatTrak, IsSouvenir)
-        SELECT s.MarketHashName, N'Skin', s.Weapon, s.SkinName, s.Wear, s.IsStatTrak, s.IsSouvenir
+        INSERT INTO dbo.Item (MarketHashName, ItemType, Weapon, SkinName, Wear, IsStatTrak, IsSouvenir, IconUrl)
+        SELECT s.MarketHashName, N'Skin', s.Weapon, s.SkinName, s.Wear, s.IsStatTrak, s.IsSouvenir, s.IconUrl
         FROM #Stage s
         WHERE NOT EXISTS (SELECT 1 FROM dbo.Item i WHERE i.MarketHashName = s.MarketHashName);
+
+        -- Keep the picture current for items the market described (only some lanes carry one).
+        UPDATE i SET i.IconUrl = s.IconUrl
+        FROM dbo.Item i
+        JOIN #Stage s ON s.MarketHashName = i.MarketHashName
+        WHERE s.IconUrl IS NOT NULL AND (i.IconUrl IS NULL OR i.IconUrl <> s.IconUrl);
 
         -- 2. Resolve item ids and decide which rows deserve a new snapshot.
         UPDATE s
         SET s.ItemId = i.Id,
             s.WriteSnapshot = CASE
+                WHEN s.IconOnly = 1 THEN 0
                 WHEN l.ItemId IS NULL THEN 1
                 WHEN l.LastSnapshotAt <= DATEADD(SECOND, -@heartbeatSeconds, s.CapturedAt) THEN 1
                 WHEN EXISTS (SELECT s.Ask, s.AskQty, s.Bid, s.BidQty, s.LastSale
@@ -230,7 +243,7 @@ public sealed class PriceRepository(string connectionString, ILogger<PriceReposi
         INSERT INTO dbo.PriceSnapshot (ItemId, MarketId, CapturedAt, Ask, AskQty, Bid, BidQty, LastSale, Currency)
         SELECT s.ItemId, @marketId, s.CapturedAt, s.Ask, s.AskQty, s.Bid, s.BidQty, s.LastSale, s.Currency
         FROM #Stage s
-        WHERE s.WriteSnapshot = 1
+        WHERE s.WriteSnapshot = 1 AND s.IconOnly = 0
           AND NOT EXISTS (SELECT 1 FROM dbo.PriceSnapshot p
                           WHERE p.ItemId = s.ItemId AND p.MarketId = @marketId AND p.CapturedAt = s.CapturedAt);
 
@@ -238,7 +251,7 @@ public sealed class PriceRepository(string connectionString, ILogger<PriceReposi
 
         -- 4. Upsert current state.
         MERGE dbo.ItemMarketLatest AS t
-        USING (SELECT * FROM #Stage WHERE ItemId IS NOT NULL) AS s
+        USING (SELECT * FROM #Stage WHERE ItemId IS NOT NULL AND IconOnly = 0) AS s
             ON t.ItemId = s.ItemId AND t.MarketId = @marketId
         WHEN MATCHED THEN UPDATE SET
             Ask = s.Ask, AskQty = s.AskQty, Bid = s.Bid, BidQty = s.BidQty, LastSale = s.LastSale,
@@ -248,18 +261,19 @@ public sealed class PriceRepository(string connectionString, ILogger<PriceReposi
             (ItemId, MarketId, Ask, AskQty, Bid, BidQty, LastSale, Currency, CapturedAt, LastSnapshotAt)
             VALUES (s.ItemId, @marketId, s.Ask, s.AskQty, s.Bid, s.BidQty, s.LastSale, s.Currency, s.CapturedAt, s.CapturedAt);
 
-        -- 5. Replace the stored order-book depth of every item that arrived with depth
-        --    (an empty book clears the old ladder).
+        -- 5. The stored ladder always belongs to the latest quote: drop it for every item in this batch, then
+        --    store the new one for items that arrived with depth. A later quote without depth (e.g. the hourly
+        --    sweep) therefore clears a ladder that is no longer current.
         DELETE l
         FROM dbo.OrderBookLevel l
         WHERE l.MarketId = @marketId
-          AND l.ItemId IN (SELECT s.ItemId FROM #Stage s WHERE s.HasDepth = 1 AND s.ItemId IS NOT NULL);
+          AND l.ItemId IN (SELECT s.ItemId FROM #Stage s WHERE s.ItemId IS NOT NULL AND s.IconOnly = 0);
 
         INSERT INTO dbo.OrderBookLevel (ItemId, MarketId, Side, Level, Price, Quantity, CapturedAt)
         SELECT s.ItemId, @marketId, d.Side, d.Level, d.Price, d.Quantity, s.CapturedAt
         FROM #StageLevels d
         JOIN #Stage s ON s.MarketHashName = d.MarketHashName
-        WHERE s.ItemId IS NOT NULL;
+        WHERE s.ItemId IS NOT NULL AND s.IconOnly = 0;
 
         DROP TABLE #StageLevels;
         DROP TABLE #Stage;

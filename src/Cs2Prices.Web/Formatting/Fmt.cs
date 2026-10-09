@@ -46,6 +46,24 @@ public static class Fmt
     public static string ItemTitle(string? weapon, string? skin, string marketHashName) =>
         !string.IsNullOrEmpty(weapon) && !string.IsNullOrEmpty(skin) ? $"{weapon} | {skin}" : marketHashName;
 
+    /// <summary>
+    /// Steam CDN address of an item picture, or null. <paramref name="size"/> like "360fx360f" gives a resized
+    /// copy; null gives the original. Only hash-shaped values are accepted, so nothing odd ends up in a URL.
+    /// </summary>
+    public static string? ImageUrl(string? iconHash, string? size = null)
+    {
+        if (string.IsNullOrEmpty(iconHash) || iconHash.Length > 512 ||
+            !iconHash.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
+            return null;
+
+        var url = "https://community.cloudflare.steamstatic.com/economy/image/" + iconHash;
+        return size is null ? url : url + "/" + size;
+    }
+
+    /// <summary>The item's Steam Community Market page.</summary>
+    public static string SteamListingUrl(string marketHashName) =>
+        "https://steamcommunity.com/market/listings/730/" + Uri.EscapeDataString(marketHashName);
+
     /// <summary>Short wear label for dense tables.</summary>
     public static string WearShort(string? wear) => wear switch
     {

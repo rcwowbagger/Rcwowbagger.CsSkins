@@ -169,4 +169,30 @@ public class SteamSweepProviderTests
 
         Assert.Equal([2], delivered);
     }
+
+    [Fact]
+    public void Map_keeps_the_steam_image_hash()
+    {
+        var json = """{"name":"X","hash_name":"X","sell_listings":1,"sell_price":100,"asset_description":{"icon_url":"hash123","appid":730}}""";
+        var r = System.Text.Json.JsonSerializer.Deserialize<SteamSearchResult>(json, SteamSweepProvider.SerializerOptions)!;
+
+        Assert.Equal("hash123", SteamSweepProvider.Map("X", r, "USD", DateTime.UtcNow).IconUrl);
+    }
+
+    [Fact]
+    public async Task Watched_items_yield_only_their_picture_from_the_sweep()
+    {
+        var page = Page(2,
+            """{"name":"A | A (Factory New)","hash_name":"A | A (Factory New)","sell_listings":3,"sell_price":500,"asset_description":{"icon_url":"hashA"}}""",
+            Item("B | B (Factory New)", 700, 2));
+        var (provider, _) = Create(_ => FakeHandler.Json(page));
+
+        var result = await provider.CollectAsync(["A | A (Factory New)"]);
+
+        var a = result.Quotes.Single(q => q.MarketHashName == "A | A (Factory New)");
+        Assert.True(a.IconOnly);
+        Assert.Equal("hashA", a.IconUrl);
+        Assert.Null(a.Ask);
+        Assert.False(result.Quotes.Single(q => q.MarketHashName == "B | B (Factory New)").IconOnly);
+    }
 }

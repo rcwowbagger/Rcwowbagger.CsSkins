@@ -75,7 +75,7 @@ public class CatalogSqlTests
             [new BookLevel(9m, 7)]);
         var quotes = new[]
         {
-            new PriceQuote("AK-47 | Redline (Field-Tested)", 10m, 3, 9m, 7, null, "USD", at, depth),
+            new PriceQuote("AK-47 | Redline (Field-Tested)", 10m, 3, 9m, 7, null, "USD", at, depth, "iconhash"),
             new PriceQuote("Sticker | Something", 1m, 1, null, null, null, "USD", at),
             new PriceQuote("AK-47 | Redline (Field-Tested)", 99m, 1, null, null, null, "USD", at)
         };
@@ -84,6 +84,7 @@ public class CatalogSqlTests
 
         Assert.Single(rows.Rows);
         Assert.True((bool)rows.Rows[0]["HasDepth"]);
+        Assert.Equal("iconhash", rows.Rows[0]["IconUrl"]);
         Assert.Equal(3, levels.Rows.Count);
         Assert.Equal("A", levels.Rows[0]["Side"]);
         Assert.Equal((short)2, levels.Rows[1]["Level"]);
@@ -102,5 +103,16 @@ public class CatalogSqlTests
                 .Split(',').Select(t => t.Replace("ASC", "").Replace("DESC", "").Trim()).Where(t => t.StartsWith("i.") ).ToList();
             Assert.Equal(terms.Count, terms.Distinct().Count());
         }
+    }
+
+    [Fact]
+    public void Icon_only_quotes_are_flagged_in_the_stage_table()
+    {
+        var at = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var (rows, _) = PriceRepository.BuildStageTables(
+            [new PriceQuote("AK-47 | Redline (Field-Tested)", null, null, null, null, null, "CHF", at, IconUrl: "h", IconOnly: true)]);
+
+        Assert.True((bool)rows.Rows[0]["IconOnly"]);
+        Assert.Equal("h", rows.Rows[0]["IconUrl"]);
     }
 }

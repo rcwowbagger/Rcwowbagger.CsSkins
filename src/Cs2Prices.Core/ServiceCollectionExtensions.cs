@@ -43,6 +43,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton(TimeProvider.System);
         AddSkinport(services, configuration);
         AddSteam(services, configuration);
+        services.TryAddSingleton<IItemRefresher, ItemRefresher>();
         return services;
     }
 

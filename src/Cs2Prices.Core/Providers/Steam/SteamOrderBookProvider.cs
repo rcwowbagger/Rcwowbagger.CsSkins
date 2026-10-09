@@ -1,7 +1,6 @@
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Cs2Prices.Core.Domain;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -9,22 +8,28 @@ using Microsoft.Extensions.Options;
 namespace Cs2Prices.Core.Providers.Steam;
 
 /// <summary>
-/// Steam lane 2: for each watched item, reads the live order book (itemordershistogram) and records the real
-/// bid (highest buy order) and ask (lowest sell order) with the quantity at the top of each side.
+/// Steam lane 2: for each watched item, reads the live order book from Steam's market/orderbook endpoint
+/// and records the real bid (highest buy order) and ask (lowest sell order) with the quantity at the top of
+/// each side plus the price ladder behind them.
 /// Needs Item.IsWatched = 1 on the items to follow. At most MaxWatchlistPerCycle items are read per poll;
 /// larger watchlists are covered round-robin.
 /// </summary>
-public sealed partial class SteamOrderBookProvider(
+/// <remarks>
+/// The endpoint is keyed by market hash name (the old itemordershistogram needed an item_nameid scraped from
+/// the listing page, which Steam's redesigned market no longer embeds). It answers in the requester's own
+/// Steam currency; the response says which one (eCurrency).
+/// </remarks>
+public sealed class SteamOrderBookProvider(
     HttpClient http,
     IOptions<SteamOptions> options,
     SteamThrottle throttle,
-    ISteamNameIdStore nameIds,
     TimeProvider time,
     ILogger<SteamOrderBookProvider> logger) : IMarketProvider
 {
     private readonly SteamOptions _options = options.Value;
     private int _cursor;
     private bool _warnedEmpty;
+    private bool _warnedCurrency;
 
     public byte MarketId => MarketIds.Steam;
 
@@ -60,28 +65,7 @@ public sealed partial class SteamOrderBookProvider(
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var nameId = await nameIds.GetAsync(name, cancellationToken);
-            if (nameId is null)
-            {
-                var lookup = await LookupNameIdAsync(name, cancellationToken);
-                if (lookup.RateLimited)
-                {
-                    rateLimitHits++;
-                    break;
-                }
-
-                if (lookup.Value is null)
-                {
-                    logger.LogWarning("Could not find Steam item_nameid for {Item}", name);
-                    failed++;
-                    continue;
-                }
-
-                nameId = lookup.Value;
-                await nameIds.SetAsync(name, nameId.Value, cancellationToken);
-            }
-
-            var book = await GetOrderBookAsync(nameId.Value, cancellationToken);
+            var book = await GetOrderBookAsync(name, cancellationToken);
             if (book.RateLimited)
             {
                 rateLimitHits++;
@@ -90,13 +74,25 @@ public sealed partial class SteamOrderBookProvider(
 
             if (book.Value is null)
             {
+                logger.LogWarning("Steam returned no usable order book for {Item}", name);
                 failed++;
                 continue;
             }
 
+            var currency = book.Value.Currency ?? _options.CurrencyCode;
+            if (!_warnedCurrency && !string.Equals(currency, _options.CurrencyCode, StringComparison.OrdinalIgnoreCase))
+            {
+                // The order book cannot be requested in a chosen currency, so the sweep must use the same one.
+                logger.LogWarning(
+                    "Steam order books arrive in {Actual} but Providers:Steam:CurrencyCode is {Configured}; " +
+                    "set CurrencyId/CurrencyCode to match so both lanes store the same currency",
+                    currency, _options.CurrencyCode);
+                _warnedCurrency = true;
+            }
+
             quotes.Add(new PriceQuote(
                 name, book.Value.Ask, book.Value.AskQty, book.Value.Bid, book.Value.BidQty,
-                LastSale: null, _options.CurrencyCode, time.GetUtcNow().UtcDateTime,
+                LastSale: null, currency, time.GetUtcNow().UtcDateTime,
                 Depth: new OrderBookDepth(book.Value.Asks, book.Value.Bids)));
         }
 
@@ -106,204 +102,115 @@ public sealed partial class SteamOrderBookProvider(
         yield return new FetchResult(quotes, failed, rateLimitHits);
     }
 
-    private async Task<Outcome<long?>> LookupNameIdAsync(string name, CancellationToken ct)
+    private async Task<Outcome<OrderBook?>> GetOrderBookAsync(string marketHashName, CancellationToken ct)
     {
         await throttle.WaitAsync(ct);
-        using var response = await http.GetAsync($"market/listings/730/{Uri.EscapeDataString(name)}", ct);
+        using var response = await http.GetAsync(BuildUrl(marketHashName), ct);
 
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
             throttle.TripCooldown(_options.RateLimitCooldown);
-            logger.LogWarning("Steam returned 429 while looking up item_nameid for {Item}", name);
-            return new Outcome<long?>(null, true);
-        }
-
-        if (response.StatusCode == HttpStatusCode.NotFound)
-            return new Outcome<long?>(null, false);
-
-        response.EnsureSuccessStatusCode();
-        var html = await response.Content.ReadAsStringAsync(ct);
-        return new Outcome<long?>(ParseNameId(html), false);
-    }
-
-    private async Task<Outcome<OrderBook?>> GetOrderBookAsync(long nameId, CancellationToken ct)
-    {
-        await throttle.WaitAsync(ct);
-        var url = $"market/itemordershistogram?country={_options.Country}&language=english" +
-                  $"&currency={_options.CurrencyId}&item_nameid={nameId}&two_factor=0&norender=1";
-        using var response = await http.GetAsync(url, ct);
-
-        if (response.StatusCode == HttpStatusCode.TooManyRequests)
-        {
-            throttle.TripCooldown(_options.RateLimitCooldown);
-            logger.LogWarning("Steam returned 429 for order book of item_nameid {NameId}", nameId);
+            logger.LogWarning("Steam returned 429 for the order book of {Item}", marketHashName);
             return new Outcome<OrderBook?>(null, true);
         }
+
+        if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.NotFound)
+            return new Outcome<OrderBook?>(null, false);
 
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync(ct);
         return new Outcome<OrderBook?>(ParseOrderBook(json), false);
     }
 
-    /// <summary>The listing page embeds the id as Market_LoadOrderSpread( 175985258 ).</summary>
-    internal static long? ParseNameId(string html)
-    {
-        var m = NameIdRegex().Match(html);
-        return m.Success && long.TryParse(m.Groups[1].Value, out var id) ? id : null;
-    }
+    /// <summary>market/orderbook?q=Load&amp;qp=[730,"AK-47 | Redline (Field-Tested)"]</summary>
+    internal static string BuildUrl(string marketHashName) =>
+        "market/orderbook?q=Load&qp=" + Uri.EscapeDataString(JsonSerializer.Serialize(new object[] { 730, marketHashName }));
 
     /// <summary>
-    /// Parses itemordershistogram?norender=1. highest_buy_order / lowest_sell_order are minor units (cents);
-    /// the *_order_table arrays list price levels best-first with a quantity each.
-    /// Returns null when Steam reports failure (e.g. success = 104 for an unknown item_nameid).
+    /// Parses market/orderbook. The payload is {"data":{"success":true,"data":{...}}} with prices in minor units
+    /// (cents): amtMaxBuyOrder / amtMinSellOrder are the best bid and ask, and rgCompactBuyOrders /
+    /// rgCompactSellOrders are flat [price, quantity, price, quantity, ...] lists, best price first, with the
+    /// quantity at that price level. Returns null when Steam reports failure or the payload has no book.
     /// </summary>
     internal static OrderBook? ParseOrderBook(string json)
     {
         using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        if (root.ValueKind != JsonValueKind.Object || !IsSuccess(root))
+        var cur = doc.RootElement;
+
+        // Unwrap {"data":{...}} envelopes, honouring an explicit success=false on the way.
+        while (cur.ValueKind == JsonValueKind.Object)
+        {
+            if (cur.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
+                return null;
+
+            if (cur.TryGetProperty("data", out var inner) && inner.ValueKind == JsonValueKind.Object)
+                cur = inner;
+            else
+                break;
+        }
+
+        if (cur.ValueKind != JsonValueKind.Object ||
+            !(cur.TryGetProperty("rgCompactBuyOrders", out _) || cur.TryGetProperty("rgCompactSellOrders", out _) ||
+              cur.TryGetProperty("amtMaxBuyOrder", out _) || cur.TryGetProperty("amtMinSellOrder", out _)))
             return null;
 
-        var asks = ReadLevels(root, "sell_order_table");
-        var bids = ReadLevels(root, "buy_order_table");
+        var asks = ReadLevels(cur, "rgCompactSellOrders");
+        var bids = ReadLevels(cur, "rgCompactBuyOrders");
 
         return new OrderBook(
-            Ask: ReadCents(root, "lowest_sell_order") ?? asks.FirstOrDefault()?.Price,
-            AskQty: ReadFirstQuantity(root, "sell_order_table"),
-            Bid: ReadCents(root, "highest_buy_order") ?? bids.FirstOrDefault()?.Price,
-            BidQty: ReadFirstQuantity(root, "buy_order_table"),
+            Ask: ReadCents(cur, "amtMinSellOrder") ?? asks.FirstOrDefault()?.Price,
+            AskQty: asks.FirstOrDefault()?.Quantity,
+            Bid: ReadCents(cur, "amtMaxBuyOrder") ?? bids.FirstOrDefault()?.Price,
+            BidQty: bids.FirstOrDefault()?.Quantity,
             Asks: asks,
-            Bids: bids);
+            Bids: bids,
+            Currency: cur.TryGetProperty("eCurrency", out var c) && c.TryGetInt32(out var id) ? CurrencyCodeFor(id) : null);
     }
 
-    /// <summary>
-    /// Reads the price ladder from a *_order_table array, best price first. Prices there are display strings
-    /// such as "$1,234.56"; rows that cannot be read are skipped.
-    /// </summary>
+    /// <summary>Steam's currency ids (ECurrencyCode) to ISO codes.</summary>
+    internal static string? CurrencyCodeFor(int id) => id switch
+    {
+        1 => "USD", 2 => "GBP", 3 => "EUR", 4 => "CHF", 5 => "RUB", 6 => "PLN", 7 => "BRL", 8 => "JPY",
+        9 => "NOK", 10 => "IDR", 11 => "MYR", 12 => "PHP", 13 => "SGD", 14 => "THB", 15 => "VND", 16 => "KRW",
+        17 => "TRY", 18 => "UAH", 19 => "MXN", 20 => "CAD", 21 => "AUD", 22 => "NZD", 23 => "CNY", 24 => "INR",
+        25 => "CLP", 26 => "PEN", 27 => "COP", 28 => "ZAR", 29 => "HKD", 30 => "TWD", 31 => "SAR", 32 => "AED",
+        34 => "ARS", 35 => "ILS", 37 => "KZT", 38 => "KWD", 39 => "QAR", 40 => "CRC", 41 => "UYU",
+        _ => null
+    };
+
+    /// <summary>Reads a flat [price, quantity, ...] list into levels (price in cents), best first.</summary>
     private static List<BookLevel> ReadLevels(JsonElement root, string property)
     {
         var levels = new List<BookLevel>();
-        if (!root.TryGetProperty(property, out var table) || table.ValueKind != JsonValueKind.Array)
+        if (!root.TryGetProperty(property, out var list) || list.ValueKind != JsonValueKind.Array)
             return levels;
 
-        foreach (var row in table.EnumerateArray())
+        var items = list.EnumerateArray().ToList();
+        for (var i = 0; i + 1 < items.Count && levels.Count < MaxStoredLevels; i += 2)
         {
-            if (levels.Count >= MaxStoredLevels)
-                break;
-
-            if (row.ValueKind != JsonValueKind.Object ||
-                !row.TryGetProperty("price", out var priceElement) || !TryReadPrice(priceElement, out var price) ||
-                !row.TryGetProperty("quantity", out var qtyElement) || !TryReadInt(qtyElement, out var quantity))
+            if (!items[i].TryGetDecimal(out var cents) || cents <= 0 || !items[i + 1].TryGetInt32(out var quantity))
                 continue;
 
-            levels.Add(new BookLevel(price, quantity));
+            levels.Add(new BookLevel(cents / 100m, quantity));
         }
 
         return levels;
     }
 
-    private static bool TryReadPrice(JsonElement element, out decimal price)
-    {
-        price = 0;
-        switch (element.ValueKind)
-        {
-            case JsonValueKind.Number:
-                return element.TryGetDecimal(out price) && price > 0;
-            case JsonValueKind.String:
-                var m = PriceTextRegex().Match(element.GetString() ?? "");
-                return m.Success &&
-                       decimal.TryParse(m.Value.Replace(",", ""), System.Globalization.NumberStyles.Number,
-                           System.Globalization.CultureInfo.InvariantCulture, out price) &&
-                       price > 0;
-            default:
-                return false;
-        }
-    }
-
-    private static bool TryReadInt(JsonElement element, out int value)
-    {
-        value = 0;
-        return element.ValueKind switch
-        {
-            JsonValueKind.Number => element.TryGetInt32(out value),
-            JsonValueKind.String => int.TryParse(
-                element.GetString()?.Replace(",", ""), System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture, out value),
-            _ => false
-        };
-    }
-
-    private static bool IsSuccess(JsonElement root)
-    {
-        if (!root.TryGetProperty("success", out var s))
-            return false;
-
-        return s.ValueKind switch
-        {
-            JsonValueKind.True => true,
-            JsonValueKind.Number => s.TryGetInt32(out var n) && n == 1,
-            JsonValueKind.String => s.GetString() == "1",
-            _ => false
-        };
-    }
-
     private static decimal? ReadCents(JsonElement root, string property)
     {
-        if (!root.TryGetProperty(property, out var p))
+        if (!root.TryGetProperty(property, out var p) || p.ValueKind != JsonValueKind.Number || !p.TryGetDecimal(out var cents))
             return null;
-
-        decimal cents;
-        switch (p.ValueKind)
-        {
-            case JsonValueKind.Number when p.TryGetDecimal(out var n):
-                cents = n;
-                break;
-            case JsonValueKind.String when decimal.TryParse(
-                p.GetString()?.Replace(",", ""), System.Globalization.NumberStyles.Number,
-                System.Globalization.CultureInfo.InvariantCulture, out var s):
-                cents = s;
-                break;
-            default:
-                return null;
-        }
 
         return cents > 0 ? cents / 100m : null;
     }
-
-    private static int? ReadFirstQuantity(JsonElement root, string property)
-    {
-        if (!root.TryGetProperty(property, out var table) ||
-            table.ValueKind != JsonValueKind.Array ||
-            table.GetArrayLength() == 0)
-            return null;
-
-        var first = table[0];
-        if (first.ValueKind != JsonValueKind.Object || !first.TryGetProperty("quantity", out var q))
-            return null;
-
-        return q.ValueKind switch
-        {
-            JsonValueKind.Number when q.TryGetInt32(out var n) => n,
-            JsonValueKind.String when int.TryParse(
-                q.GetString()?.Replace(",", ""), System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture, out var s) => s,
-            _ => null
-        };
-    }
-
-    [GeneratedRegex(@"Market_LoadOrderSpread\(\s*(\d+)\s*\)")]
-    private static partial Regex NameIdRegex();
-
-    /// <summary>First number in a display price such as "$1,234.56".</summary>
-    [GeneratedRegex(@"\d[\d,]*(?:\.\d+)?")]
-    private static partial Regex PriceTextRegex();
 
     /// <summary>Levels stored per side; the UI shows fewer.</summary>
     private const int MaxStoredLevels = 15;
 
     internal sealed record OrderBook(
         decimal? Ask, int? AskQty, decimal? Bid, int? BidQty,
-        IReadOnlyList<BookLevel> Asks, IReadOnlyList<BookLevel> Bids);
+        IReadOnlyList<BookLevel> Asks, IReadOnlyList<BookLevel> Bids, string? Currency = null);
 
     private sealed record Outcome<T>(T? Value, bool RateLimited);
 }
