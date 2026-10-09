@@ -1,0 +1,315 @@
+@page "/"
+@inject ICatalogQueries Queries
+@inject NavigationManager Nav
+@inject TimeProvider Time
+@implements IDisposable
+
+<PageTitle>Catalog · CS2 Prices</PageTitle>
+
+@if (markets is null)
+{
+    <p class="muted">Loading markets…</p>
+}
+else if (markets.Count == 0)
+{
+    <div class="empty-state">
+        <h1>No prices collected yet</h1>
+        <p>Start the collector and give it a few minutes; markets appear here as soon as their first prices are stored.</p>
+        <code>dotnet run --project src/Cs2Prices.Collector</code>
+    </div>
+}
+else
+{
+    <div class="toolbar">
+        <RadzenSelectBar TValue="byte" Value="@(market?.Id ?? (byte)0)" ValueChanged="@OnMarketChanged" Size="ButtonSize.Medium">
+            <Items>
+                @foreach (var m in markets)
+                {
+                    <RadzenSelectBarItem Text="@m.Name" Value="@m.Id" />
+                }
+            </Items>
+        </RadzenSelectBar>
+
+        <input type="search"
+               class="form-control search"
+               placeholder="Search items, e.g. ak redline or awp asiimov"
+               aria-label="Search items"
+               value="@searchText"
+               @oninput="OnSearchInput" />
+
+        <label class="watched-only">
+            <input type="checkbox" checked="@WatchedOnly" @onchange="OnWatchedOnlyChanged" />
+            Watched only
+        </label>
+    </div>
+
+    @if (market is not null)
+    {
+        <p class="market-meta">
+            @market.Name · @market.Currency · @market.ItemCount.ToString("N0") items · updated @Fmt.Ago(market.LastUpdated, Time.GetUtcNow().UtcDateTime)
+        </p>
+    }
+
+    @if (error is not null)
+    {
+        <div class="alert alert-danger" role="alert">@error</div>
+    }
+
+    <RadzenDataGrid @ref="grid"
+                    TItem="CatalogRow"
+                    Data="@rows"
+                    Count="@total"
+                    LoadData="@LoadDataAsync"
+                    IsLoading="@loading"
+                    AllowPaging="true"
+                    PageSize="@PageSize"
+                    ShowPagingSummary="true"
+                    PagerHorizontalAlign="HorizontalAlign.Left"
+                    AllowSorting="true"
+                    Density="Density.Compact"
+                    RowSelect="@OpenItem"
+                    Class="catalog-grid">
+        <Columns>
+            <RadzenDataGridColumn TItem="CatalogRow" Title="" Width="3rem" Sortable="false" TextAlign="TextAlign.Center">
+                <Template Context="r">
+                    <button type="button"
+                            class="watch-toggle @(r.IsWatched ? "on" : "")"
+                            title="@(r.IsWatched ? "Watched: live order book on Steam. Click to stop." : "Watch this item to get a live Steam order book")"
+                            aria-label="@(r.IsWatched ? "Stop watching" : "Watch")"
+                            aria-pressed="@(r.IsWatched ? "true" : "false")"
+                            @onclick="() => ToggleWatchAsync(r)"
+                            @onclick:stopPropagation="true">@(r.IsWatched ? "★" : "☆")</button>
+                </Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.MarketHashName)" Title="Item" MinWidth="16rem">
+                <Template Context="r">
+                    <a class="item-link" href="item/@r.ItemId" @onclick:stopPropagation="true">@Fmt.ItemTitle(r.Weapon, r.SkinName, r.MarketHashName)</a>
+                    @if (r.IsStatTrak)
+                    {
+                        <span class="tag tag-stattrak">StatTrak™</span>
+                    }
+                    @if (r.IsSouvenir)
+                    {
+                        <span class="tag tag-souvenir">Souvenir</span>
+                    }
+                </Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.Wear)" Title="Wear" Width="5rem" TextAlign="TextAlign.Center">
+                <Template Context="r"><span title="@r.Wear">@Fmt.WearShort(r.Wear)</span></Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.Bid)" Title="Bid" TextAlign="TextAlign.Right" Width="7rem">
+                <Template Context="r"><span class="num">@Fmt.Money(r.Bid, r.Currency)</span></Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.Ask)" Title="Ask" TextAlign="TextAlign.Right" Width="7rem">
+                <Template Context="r"><span class="num">@Fmt.Money(r.Ask, r.Currency)</span></Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.Spread)" Title="Spread" TextAlign="TextAlign.Right" Width="7rem">
+                <Template Context="r"><span class="num">@Fmt.Money(r.Spread, r.Currency)</span></Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.SpreadPercent)" Title="Spread %" TextAlign="TextAlign.Right" Width="6rem">
+                <Template Context="r"><span class="num">@Fmt.Percent(r.SpreadPercent)</span></Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.AskQty)" Title="Ask qty" TextAlign="TextAlign.Right" Width="6rem">
+                <Template Context="r"><span class="num">@Fmt.Qty(r.AskQty)</span></Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.BidQty)" Title="Bid qty" TextAlign="TextAlign.Right" Width="6rem">
+                <Template Context="r"><span class="num">@Fmt.Qty(r.BidQty)</span></Template>
+            </RadzenDataGridColumn>
+
+            <RadzenDataGridColumn TItem="CatalogRow" Property="@nameof(CatalogRow.CapturedAt)" Title="Updated" TextAlign="TextAlign.Right" Width="8rem">
+                <Template Context="r"><span class="muted">@Fmt.Ago(r.CapturedAt, Time.GetUtcNow().UtcDateTime)</span></Template>
+            </RadzenDataGridColumn>
+        </Columns>
+    </RadzenDataGrid>
+}
+
+@code {
+    private const int PageSize = 50;
+
+    /// <summary>Market code in the URL (?market=steam). Unknown or missing falls back to the first market.</summary>
+    [Parameter, SupplyParameterFromQuery(Name = "market")]
+    public string? MarketCode { get; set; }
+
+    /// <summary>Search text in the URL (?q=ak redline), so Back from an item page restores the search.</summary>
+    [Parameter, SupplyParameterFromQuery(Name = "q")]
+    public string? Search { get; set; }
+
+    [Parameter, SupplyParameterFromQuery(Name = "watched")]
+    public bool WatchedOnly { get; set; }
+
+    [Parameter]
+    public int SearchDebounceMs { get; set; } = 300;
+
+    private static readonly Dictionary<string, CatalogSort> SortByProperty = new()
+    {
+        [nameof(CatalogRow.MarketHashName)] = CatalogSort.Name,
+        [nameof(CatalogRow.Wear)] = CatalogSort.Wear,
+        [nameof(CatalogRow.Bid)] = CatalogSort.Bid,
+        [nameof(CatalogRow.Ask)] = CatalogSort.Ask,
+        [nameof(CatalogRow.Spread)] = CatalogSort.Spread,
+        [nameof(CatalogRow.SpreadPercent)] = CatalogSort.SpreadPercent,
+        [nameof(CatalogRow.AskQty)] = CatalogSort.AskQty,
+        [nameof(CatalogRow.BidQty)] = CatalogSort.BidQty,
+        [nameof(CatalogRow.CapturedAt)] = CatalogSort.Updated
+    };
+
+    private IReadOnlyList<MarketInfo>? markets;
+    private MarketInfo? market;
+    private RadzenDataGrid<CatalogRow>? grid;
+    private IEnumerable<CatalogRow>? rows;
+    private int total;
+    private bool loading;
+    private string? error;
+    private string searchText = "";
+    private string? lastNavigatedSearch;
+    private CancellationTokenSource? debounce;
+    private (byte? Market, string? Search, bool Watched) applied;
+    private int requestId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            markets = await Queries.GetMarketsAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not read markets: {ex.Message}";
+            markets = [];
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (markets is null)
+            return;
+
+        market = markets.FirstOrDefault(m => string.Equals(m.Code, MarketCode, StringComparison.OrdinalIgnoreCase))
+                 ?? markets.FirstOrDefault();
+
+        // Text that did not come from our own navigation (Back/Forward, pasted link) replaces the box.
+        var normalized = Normalize(Search);
+        if (normalized != lastNavigatedSearch)
+        {
+            searchText = Search ?? "";
+            lastNavigatedSearch = normalized;
+        }
+
+        var state = (market?.Id, normalized, WatchedOnly);
+        if (state != applied)
+        {
+            applied = state;
+            if (grid is not null)
+                await grid.FirstPage(true);
+        }
+    }
+
+    private async Task LoadDataAsync(LoadDataArgs args)
+    {
+        if (market is null)
+            return;
+
+        var ticket = ++requestId;
+        loading = true;
+        error = null;
+
+        var sort = args.Sorts?.FirstOrDefault();
+        var sortBy = sort?.Property is { } p && SortByProperty.TryGetValue(p, out var s) ? s : CatalogSort.Name;
+        var descending = sort?.SortOrder == SortOrder.Descending;
+
+        try
+        {
+            var result = await Queries.SearchAsync(
+                new CatalogQuery(market.Id, Normalize(Search), sortBy, descending, args.Skip ?? 0, args.Top ?? PageSize, WatchedOnly),
+                CancellationToken.None);
+
+            if (ticket != requestId)
+                return; // a newer request superseded this one
+
+            rows = result.Items;
+            total = result.TotalCount;
+        }
+        catch (Exception ex)
+        {
+            if (ticket != requestId)
+                return;
+
+            rows = [];
+            total = 0;
+            error = $"Could not load prices: {ex.Message}";
+        }
+        finally
+        {
+            if (ticket == requestId)
+                loading = false;
+        }
+    }
+
+    private void OnMarketChanged(byte marketId)
+    {
+        var code = markets?.FirstOrDefault(m => m.Id == marketId)?.Code;
+        NavigateToState(code, Search, WatchedOnly);
+    }
+
+    private void OnWatchedOnlyChanged(ChangeEventArgs e) =>
+        NavigateToState(market?.Code, Search, e.Value is true);
+
+    private async Task OnSearchInput(ChangeEventArgs e)
+    {
+        searchText = e.Value?.ToString() ?? "";
+
+        debounce?.Cancel();
+        debounce?.Dispose();
+        debounce = new CancellationTokenSource();
+        var token = debounce.Token;
+
+        try
+        {
+            if (SearchDebounceMs > 0)
+                await Task.Delay(SearchDebounceMs, token);
+        }
+        catch (OperationCanceledException)
+        {
+            return; // a newer keystroke took over
+        }
+
+        lastNavigatedSearch = Normalize(searchText);
+        NavigateToState(market?.Code, searchText, WatchedOnly, replace: true);
+    }
+
+    private void NavigateToState(string? marketCode, string? search, bool watchedOnly, bool replace = false)
+    {
+        var uri = Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["market"] = marketCode,
+            ["q"] = Normalize(search),
+            ["watched"] = watchedOnly ? "true" : null
+        });
+        Nav.NavigateTo(uri, replace: replace);
+    }
+
+    private void OpenItem(CatalogRow row) => Nav.NavigateTo($"item/{row.ItemId}");
+
+    private async Task ToggleWatchAsync(CatalogRow row)
+    {
+        var next = !row.IsWatched;
+        await Queries.SetWatchedAsync(row.ItemId, next, CancellationToken.None);
+        row.IsWatched = next;
+    }
+
+    private static string? Normalize(string? text) => string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+
+    public void Dispose()
+    {
+        debounce?.Cancel();
+        debounce?.Dispose();
+    }
+}

@@ -1,0 +1,54 @@
+@* One market's order book for an item: top of book, spread and (when the market publishes it) the price ladder. *@
+<section class="book-card" aria-label="@Book.MarketName order book">
+    <header class="book-head">
+        <h2>@Book.MarketName</h2>
+        <span class="muted">@Book.Currency · @Fmt.Ago(Book.CapturedAt, Now)</span>
+    </header>
+
+    <dl class="top-of-book">
+        <div><dt>Bid</dt><dd class="num bid">@Fmt.Money(Book.Bid, Book.Currency)</dd></div>
+        <div><dt>Ask</dt><dd class="num ask">@Fmt.Money(Book.Ask, Book.Currency)</dd></div>
+        <div><dt>Spread</dt><dd class="num">@Fmt.Money(Book.Spread, Book.Currency) <span class="muted">(@Fmt.Percent(Book.SpreadPercent))</span></dd></div>
+        <div><dt>Last sale</dt><dd class="num">@Fmt.Money(Book.LastSale, Book.Currency)</dd></div>
+    </dl>
+
+    @if (Book.HasDepth)
+    {
+        <div class="ladder">
+            <table class="side bids" aria-label="Bids">
+                <thead><tr><th>Bid</th><th class="r">Qty</th></tr></thead>
+                <tbody>
+                    @foreach (var l in Book.Bids)
+                    {
+                        <tr><td class="num bid">@Fmt.Money(l.Price, Book.Currency)</td><td class="num r">@Fmt.Qty(l.Quantity)</td></tr>
+                    }
+                </tbody>
+            </table>
+            <table class="side asks" aria-label="Asks">
+                <thead><tr><th>Ask</th><th class="r">Qty</th></tr></thead>
+                <tbody>
+                    @foreach (var l in Book.Asks)
+                    {
+                        <tr><td class="num ask">@Fmt.Money(l.Price, Book.Currency)</td><td class="num r">@Fmt.Qty(l.Quantity)</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+    else
+    {
+        <p class="muted hint">
+            @Book.MarketName publishes only the best price@(Book.Bid is null ? " (ask side)" : "").
+            @if (Book.MarketCode.StartsWith("steam", StringComparison.OrdinalIgnoreCase))
+            {
+                <text>Watch this item (☆ in the catalog) to collect Steam's full order book.</text>
+            }
+        </p>
+    }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public MarketBook Book { get; set; } = default!;
+
+    [Parameter] public DateTime Now { get; set; } = DateTime.UtcNow;
+}

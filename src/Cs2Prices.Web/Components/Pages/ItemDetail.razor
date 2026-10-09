@@ -1,0 +1,177 @@
+@page "/item/{ItemId:int}"
+@inject ICatalogQueries Queries
+@inject NavigationManager Nav
+@inject TimeProvider Time
+@inject IJSRuntime Js
+
+<PageTitle>@(item is null ? "Item" : Fmt.ItemTitle(item.Weapon, item.SkinName, item.MarketHashName)) · CS2 Prices</PageTitle>
+
+<a class="back" href="" @onclick="GoBackAsync" @onclick:preventDefault="true">← Back to catalog</a>
+
+@if (loading && item is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (error is not null)
+{
+    <div class="alert alert-danger" role="alert">@error</div>
+}
+else if (item is null)
+{
+    <p>Item not found.</p>
+}
+else
+{
+    <header class="item-head">
+        <div>
+            <h1>@Fmt.ItemTitle(item.Weapon, item.SkinName, item.MarketHashName)</h1>
+            <p class="muted">
+                @item.MarketHashName
+                @if (item.IsStatTrak) { <span class="tag tag-stattrak">StatTrak™</span> }
+                @if (item.IsSouvenir) { <span class="tag tag-souvenir">Souvenir</span> }
+            </p>
+        </div>
+        <div class="actions">
+            <button type="button" class="btn-plain" @onclick="ToggleWatchAsync"
+                    aria-pressed="@(item.IsWatched ? "true" : "false")">@(item.IsWatched ? "★ Watching" : "☆ Watch")</button>
+            <button type="button" class="btn-plain" @onclick="LoadAsync" disabled="@loading">Refresh</button>
+        </div>
+    </header>
+
+    @if (books.Count == 0)
+    {
+        <p class="muted">No market has quoted this item yet.</p>
+    }
+    else
+    {
+        <div class="books">
+            @foreach (var b in books)
+            {
+                <MarketBookCard Book="b" Now="@Time.GetUtcNow().UtcDateTime" />
+            }
+        </div>
+
+        <section class="history">
+            <div class="history-head">
+                <h2>Price history</h2>
+                <select aria-label="History market" @onchange="OnHistoryMarketChanged">
+                    @foreach (var b in books)
+                    {
+                        <option value="@b.MarketId" selected="@(b.MarketId == historyMarket)">@b.MarketName</option>
+                    }
+                </select>
+                <RadzenSelectBar TValue="HistoryRange" Value="@range" ValueChanged="@OnRangeChanged" Size="ButtonSize.Small">
+                    <Items>
+                        <RadzenSelectBarItem Text="24 h" Value="HistoryRange.Day" />
+                        <RadzenSelectBarItem Text="7 d" Value="HistoryRange.Week" />
+                        <RadzenSelectBarItem Text="30 d" Value="HistoryRange.Month" />
+                        <RadzenSelectBarItem Text="All" Value="HistoryRange.All" />
+                    </Items>
+                </RadzenSelectBar>
+            </div>
+            <PriceHistory Points="history" Currency="@HistoryCurrency" />
+        </section>
+    }
+}
+
+@code {
+    [Parameter] public int ItemId { get; set; }
+
+    private ItemInfo? item;
+    private IReadOnlyList<MarketBook> books = [];
+    private IReadOnlyList<PricePoint> history = [];
+    private byte historyMarket;
+    private HistoryRange range = HistoryRange.Week;
+    private bool loading;
+    private string? error;
+    private int historyTicket;
+
+    private string HistoryCurrency => books.FirstOrDefault(b => b.MarketId == historyMarket)?.Currency ?? "";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        item = null;
+        books = [];
+        history = [];
+        historyMarket = 0;
+        await LoadAsync();
+    }
+
+    /// <summary>Reloads item, books and history. Also the hook a later live-ticking step will call.</summary>
+    public async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+        try
+        {
+            item = await Queries.GetItemAsync(ItemId, CancellationToken.None);
+            if (item is null)
+                return;
+
+            books = await Queries.GetMarketBooksAsync(ItemId, CancellationToken.None);
+            if (books.All(b => b.MarketId != historyMarket))
+                historyMarket = books.FirstOrDefault()?.MarketId ?? 0;
+
+            await LoadHistoryAsync();
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not load item: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task LoadHistoryAsync()
+    {
+        if (historyMarket == 0)
+        {
+            history = [];
+            return;
+        }
+
+        var ticket = ++historyTicket;
+        var result = await Queries.GetHistoryAsync(ItemId, historyMarket, range, CancellationToken.None);
+        if (ticket == historyTicket)
+            history = result;
+    }
+
+    private async Task OnHistoryMarketChanged(ChangeEventArgs e)
+    {
+        if (byte.TryParse(e.Value?.ToString(), out var id))
+        {
+            historyMarket = id;
+            await LoadHistoryAsync();
+        }
+    }
+
+    private async Task OnRangeChanged(HistoryRange value)
+    {
+        range = value;
+        await LoadHistoryAsync();
+    }
+
+    private async Task ToggleWatchAsync()
+    {
+        if (item is null)
+            return;
+
+        var next = !item.IsWatched;
+        await Queries.SetWatchedAsync(item.Id, next, CancellationToken.None);
+        item.IsWatched = next;
+    }
+
+    private async Task GoBackAsync()
+    {
+        try
+        {
+            await Js.InvokeVoidAsync("history.back");
+        }
+        catch (Exception)
+        {
+            Nav.NavigateTo("");
+        }
+    }
+}

@@ -1,0 +1,121 @@
+using Bunit;
+using Cs2Prices.Core.Catalog;
+using Cs2Prices.Web.Components.Pages;
+using Microsoft.AspNetCore.Components;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace Cs2Prices.Tests;
+
+public class PagesTests : BunitContext
+{
+    private readonly FakeCatalogQueries fake = new();
+
+    public PagesTests()
+    {
+        JSInterop.Mode = JSRuntimeMode.Loose;
+        ComponentFactories.AddStub<Radzen.Blazor.RadzenChart>();
+        Services.AddSingleton<ICatalogQueries>(fake);
+        Services.AddSingleton(TimeProvider.System);
+        Services.AddScoped<Radzen.DialogService>(); Services.AddScoped<Radzen.NotificationService>(); Services.AddScoped<Radzen.TooltipService>(); Services.AddScoped<Radzen.ContextMenuService>();
+    }
+
+    [Fact]
+    public void Catalog_lists_items_for_the_first_market()
+    {
+        var cut = Render<Home>();
+        cut.WaitForAssertion(() => Assert.Contains("Redline", cut.Markup));
+
+        Assert.Contains("Asiimov", cut.Markup);
+        Assert.Equal((byte)1, fake.Queries.Last().MarketId);
+    }
+
+    [Fact]
+    public void Catalog_shows_empty_state_without_markets()
+    {
+        fake.Markets.Clear();
+        var cut = Render<Home>();
+        cut.WaitForAssertion(() => Assert.Contains("No prices collected yet", cut.Markup));
+    }
+
+    [Fact]
+    public void Typing_in_search_updates_the_url_and_filters()
+    {
+        var cut = Render<Home>(p => p.Add(x => x.SearchDebounceMs, 0));
+        cut.WaitForAssertion(() => Assert.Contains("Redline", cut.Markup));
+
+        cut.Find("input[type=search]").Input("awp");
+
+        cut.WaitForAssertion(() =>
+        {
+            var nav = Services.GetRequiredService<NavigationManager>();
+            Assert.Contains("q=awp", nav.Uri);
+        });
+    }
+
+    [Fact]
+    public void Query_string_selects_market_and_search()
+    {
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/?market=steam&q=awp");
+        var cut = Render<Home>();
+
+        cut.WaitForAssertion(() => Assert.Contains("Asiimov", cut.Markup));
+        Assert.Equal((byte)2, fake.Queries.Last().MarketId);
+        Assert.Equal("awp", fake.Queries.Last().Search);
+    }
+
+    [Fact]
+    public void Watch_star_toggles_without_opening_the_item()
+    {
+        var cut = Render<Home>();
+        cut.WaitForAssertion(() => Assert.Contains("Redline", cut.Markup));
+        var nav = Services.GetRequiredService<NavigationManager>();
+        var before = nav.Uri;
+
+        cut.Find("button.watch-toggle").Click();
+
+        Assert.Equal((10, true), fake.WatchCalls.Single());
+        Assert.Equal(before, nav.Uri);
+    }
+
+    [Fact]
+    public void Item_page_shows_a_card_per_market_with_ladder_when_available()
+    {
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 10));
+        cut.WaitForAssertion(() => Assert.Contains("Skinport", cut.Markup));
+
+        Assert.Equal(2, cut.FindAll("section.book-card").Count);
+        Assert.Single(cut.FindAll("table.asks"));          // only Steam has depth
+        Assert.Contains("$31.00", cut.Markup);
+    }
+
+    [Fact]
+    public void Item_page_loads_history_and_reloads_on_range_change()
+    {
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 10));
+        cut.WaitForAssertion(() => Assert.NotEmpty(fake.HistoryCalls));
+
+        Assert.Equal((10, (byte)1, HistoryRange.Week), fake.HistoryCalls[0]);
+
+        cut.Find("select").Change("2");
+        cut.WaitForAssertion(() => Assert.Contains(fake.HistoryCalls, c => c.Market == 2));
+    }
+
+    [Fact]
+    public void Item_page_reports_missing_items()
+    {
+        fake.Item = null;
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 999));
+        cut.WaitForAssertion(() => Assert.Contains("Item not found", cut.Markup));
+    }
+
+    [Fact]
+    public void Item_page_watch_toggle_calls_through()
+    {
+        var cut = Render<ItemDetail>(p => p.Add(x => x.ItemId, 10));
+        cut.WaitForAssertion(() => Assert.Contains("Watch", cut.Markup));
+
+        cut.FindAll("button").First(b => b.TextContent.Contains("Watch")).Click();
+
+        Assert.Equal((10, true), fake.WatchCalls.Single());
+    }
+}

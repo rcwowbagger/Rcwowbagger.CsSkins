@@ -1,0 +1,55 @@
+@* Price history of one item on one market: ask, bid and last sale over time. *@
+@if (Points.Count == 0)
+{
+    <p class="muted">No price history for this range yet.</p>
+}
+else
+{
+    <RadzenChart>
+        @if (ask.Count > 0)
+        {
+            <RadzenLineSeries Data="@ask" CategoryProperty="At" ValueProperty="Value" Title="Ask" Smooth="false" />
+        }
+        @if (bid.Count > 0)
+        {
+            <RadzenLineSeries Data="@bid" CategoryProperty="At" ValueProperty="Value" Title="Bid" Smooth="false" />
+        }
+        @if (sale.Count > 0)
+        {
+            <RadzenLineSeries Data="@sale" CategoryProperty="At" ValueProperty="Value" Title="Last sale" Smooth="false" LineType="LineType.Dashed" />
+        }
+        <RadzenCategoryAxis Padding="20" Formatter="@FormatDate" />
+        <RadzenValueAxis Formatter="@FormatValue">
+            <RadzenGridLines Visible="true" />
+        </RadzenValueAxis>
+        <RadzenLegend Position="LegendPosition.Bottom" />
+    </RadzenChart>
+}
+
+@code {
+    public sealed record ChartPoint(DateTime At, double Value);
+
+    [Parameter] public IReadOnlyList<PricePoint> Points { get; set; } = [];
+
+    [Parameter] public string Currency { get; set; } = "";
+
+    private List<ChartPoint> ask = [];
+    private List<ChartPoint> bid = [];
+    private List<ChartPoint> sale = [];
+
+    protected override void OnParametersSet()
+    {
+        ask = Series(p => p.Ask);
+        bid = Series(p => p.Bid);
+        sale = Series(p => p.LastSale);
+    }
+
+    private List<ChartPoint> Series(Func<PricePoint, decimal?> pick) =>
+        Points.Where(p => pick(p) is not null).Select(p => new ChartPoint(p.At, (double)pick(p)!.Value)).ToList();
+
+    private string FormatDate(object? value) =>
+        value is DateTime d ? d.ToString("d MMM HH:mm", System.Globalization.CultureInfo.InvariantCulture) : "";
+
+    private string FormatValue(object? value) =>
+        value is double v ? Fmt.Money((decimal)v, Currency) : "";
+}

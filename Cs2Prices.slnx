@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Cs2Prices.Collector/Cs2Prices.Collector.csproj" />
+    <Project Path="src/Cs2Prices.Core/Cs2Prices.Core.csproj" />
+    <Project Path="src/Cs2Prices.Web/Cs2Prices.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Cs2Prices.Tests/Cs2Prices.Tests.csproj" />
+  </Folder>
+</Solution>

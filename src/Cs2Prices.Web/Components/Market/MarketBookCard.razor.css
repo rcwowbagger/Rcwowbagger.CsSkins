@@ -1,0 +1,66 @@
+.book-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 0.9rem 1rem;
+}
+
+.book-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 0.5rem;
+}
+
+.book-head h2 {
+    font-size: 1.1rem;
+    margin: 0;
+}
+
+.top-of-book {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+    gap: 0.5rem;
+    margin: 0 0 0.75rem 0;
+}
+
+.top-of-book dt {
+    font-size: 0.75rem;
+    color: #6b7280;
+}
+
+.top-of-book dd {
+    margin: 0;
+    font-weight: 600;
+}
+
+.ladder {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.side {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+
+.side th {
+    text-align: left;
+    color: #6b7280;
+    font-weight: 500;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0.15rem 0.25rem;
+}
+
+.side td {
+    padding: 0.15rem 0.25rem;
+}
+
+.r { text-align: right; }
+.num { font-variant-numeric: tabular-nums; }
+.bid { color: #15803d; }
+.ask { color: #b91c1c; }
+.muted { color: #6b7280; }
+.hint { margin: 0; font-size: 0.85rem; }

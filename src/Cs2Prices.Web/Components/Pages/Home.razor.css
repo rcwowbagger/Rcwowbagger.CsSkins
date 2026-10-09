@@ -1,0 +1,98 @@
+.toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.search {
+    width: 26rem;
+    max-width: 100%;
+}
+
+.watched-only {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: #374151;
+    user-select: none;
+}
+
+.market-meta {
+    color: #6b7280;
+    margin: 0.25rem 0 0.75rem 0;
+}
+
+.muted {
+    color: #6b7280;
+}
+
+.num {
+    font-variant-numeric: tabular-nums;
+}
+
+.empty-state {
+    background: #fff;
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.5rem;
+    padding: 2rem;
+    max-width: 40rem;
+}
+
+.empty-state h1 {
+    font-size: 1.4rem;
+}
+
+.item-link {
+    font-weight: 500;
+    text-decoration: none;
+    color: #111827;
+}
+
+.item-link:hover {
+    text-decoration: underline;
+}
+
+.tag {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0 0.4rem;
+    border-radius: 0.25rem;
+    font-size: 0.72rem;
+    line-height: 1.3rem;
+    vertical-align: middle;
+}
+
+.tag-stattrak {
+    background: #ffedd5;
+    color: #9a3412;
+}
+
+.tag-souvenir {
+    background: #fef9c3;
+    color: #854d0e;
+}
+
+.watch-toggle {
+    border: 0;
+    background: transparent;
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    color: #9ca3af;
+    padding: 0.1rem 0.3rem;
+}
+
+.watch-toggle:hover {
+    color: #d97706;
+}
+
+.watch-toggle.on {
+    color: #d97706;
+}
+
+::deep .catalog-grid {
+    background: #fff;
+    cursor: pointer;
+}
